@@ -1,13 +1,20 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use vulkano::instance::Instance;
-use vulkano::instance::InstanceExtensions;
-use vulkano::instance::PhysicalDevice;
+use vulkano::buffer::BufferUsage;
+use vulkano::buffer::CpuAccessibleBuffer;
+use vulkano::command_buffer::AutoCommandBufferBuilder;
+use vulkano::command_buffer::CommandBuffer;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::device::Device;
 use vulkano::device::DeviceExtensions;
 use vulkano::device::Features;
 use vulkano::device::Queue;
+use vulkano::instance::Instance;
+use vulkano::instance::InstanceExtensions;
+use vulkano::instance::PhysicalDevice;
+use vulkano::pipeline::ComputePipeline;
+use vulkano::sync::GpuFuture;
 
 fn main() -> Result<(), Box<Error>> {
 
@@ -21,15 +28,16 @@ fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
 
     #[cfg(debug_assertions)]
     {
-        println!("Listing available devices supporting Vulkan API:");
+        println!("Listing available devices supporting Vulkan API: ");
         for device in PhysicalDevice::enumerate(&instance) {
-            println!("{:?}", device);
+            println!("{:?}: {:?}", device.name(), device);
 
-            println!("Found a queue family with this queue(s) amount:");
+            print!("Device contains queue families with this queue(s) amount: ");
             for family in device.queue_families() {
-                println!("{:?}", family.queues_count());
+                print!("{:?} ", family.queues_count());
             }
 
+            println!("---");
         }
 
         println!("");
@@ -41,7 +49,10 @@ fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
 
     #[cfg(debug_assertions)]
     {
-        println!("Chosen device: {:?}", chosen_physical_device);
+        println!(
+            "Chosen device: {:?}: {:?}",
+            chosen_physical_device.name(),
+            chosen_physical_device);
 
         println!("");
     }
@@ -50,10 +61,14 @@ fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
         .find(|&q| q.supports_graphics())
         .expect("Error: NoneError: No family supporting GRAPHICS_BIT found in chosen device");
 
+    let mut chosen_extensions = DeviceExtensions::none();
+    // // This field is required in 0.16.0 version of vulkano
+    // chosen_extensions.khr_storage_buffer_storage_class = true;
+
     let (chosen_logical_device, mut queues) = {
         Device::new(
             chosen_physical_device, &Features::none(),
-            &DeviceExtensions::none(),
+            &chosen_extensions,
             [(chosen_family, 0.5)].iter().cloned()
         )?
     };
