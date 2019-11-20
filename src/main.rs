@@ -1,6 +1,8 @@
+// Build-in modules
 use std::error::Error;
 use std::sync::Arc;
 
+// External modules
 use image::{ImageBuffer, Rgba};
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::CpuAccessibleBuffer;
@@ -24,7 +26,14 @@ use vulkano::instance::PhysicalDevice;
 use vulkano::pipeline::ComputePipeline;
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::viewport::Viewport;
+use vulkano::swapchain::Capabilities;
+use vulkano::swapchain::Surface;
+use vulkano::swapchain::{Swapchain, SurfaceTransform, PresentMode};
 use vulkano::sync::GpuFuture;
+use vulkano_win::VkSurfaceBuild;
+use winit::EventsLoop;
+use winit::Window;
+use winit::WindowBuilder;
 
 #[derive(Default, Copy, Clone)]
 struct Vertex {
@@ -33,8 +42,11 @@ struct Vertex {
 vulkano::impl_vertex!(Vertex, position);
 
 fn main() -> Result<(), Box<Error>> {
+    let (
+        instance, device, queue,
+        surface, capabilities, mut events_loop
+    ) = init()?;
 
-    let (instance, device, queue) = init()?;
 
     let image =
         StorageImage::new(
@@ -162,8 +174,19 @@ void main() {
     Ok(())
 }
 
-fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
-    let instance = Instance::new(None, &InstanceExtensions::none(), None)?;
+fn init() ->
+    Result<
+        (
+            Arc<Instance>, Arc<Device>, Arc<Queue>,
+            Arc<Surface<Window>>, Capabilities, EventsLoop
+        ),
+        Box<Error>
+    >
+{
+    let instance = {
+        let extensions = vulkano_win::required_extensions();
+        Instance::new(None, &extensions, None)?
+    };
 
     #[cfg(debug_assertions)]
     {
@@ -200,13 +223,15 @@ fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
         .find(|&q| q.supports_graphics())
         .expect("Error: NoneError: No family supporting GRAPHICS_BIT found in chosen device");
 
-    let mut chosen_extensions = DeviceExtensions::none();
-    // // This field is required in 0.16.0 version of vulkano
-    // chosen_extensions.khr_storage_buffer_storage_class = true;
-
     let (chosen_logical_device, mut queues) = {
+        let mut chosen_extensions = DeviceExtensions::none();
+        // // "khr_storage_buffer_storage_class" is required in vulkano="0.16.0"
+        // chosen_extensions.khr_storage_buffer_storage_class = true;
+        chosen_extensions.khr_swapchain = true;
+
         Device::new(
-            chosen_physical_device, &Features::none(),
+            chosen_physical_device,
+            chosen_physical_device.supported_features(),
             &chosen_extensions,
             [(chosen_family, 0.5)].iter().cloned()
         )?
@@ -215,5 +240,17 @@ fn init() -> Result<(Arc<Instance>, Arc<Device>, Arc<Queue>), Box<Error>> {
     let chosen_queue = queues.next()
         .expect("Error: NoneError: No queue found in chosen family");
 
-    Ok((instance, chosen_logical_device, chosen_queue))
+
+    let mut events_loop = EventsLoop::new();
+    let surface =
+        WindowBuilder::new().build_vk_surface(
+            &events_loop, instance.clone()
+        )?;
+
+    let capabilities = surface.capabilities(chosen_physical_device)?;
+
+    Ok((
+        instance, chosen_logical_device, chosen_queue,
+        surface, capabilities, events_loop
+    ))
 }
