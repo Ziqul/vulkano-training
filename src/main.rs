@@ -17,9 +17,12 @@ use vulkano::device::Queue;
 use vulkano::format::ClearValue;
 use vulkano::format::Format;
 use vulkano::framebuffer::Framebuffer;
+use vulkano::framebuffer::FramebufferAbstract;
+use vulkano::framebuffer::RenderPassAbstract;
 use vulkano::framebuffer::Subpass;
 use vulkano::image::Dimensions;
 use vulkano::image::StorageImage;
+use vulkano::image::swapchain::SwapchainImage;
 use vulkano::instance::Instance;
 use vulkano::instance::InstanceExtensions;
 use vulkano::instance::PhysicalDevice;
@@ -29,6 +32,7 @@ use vulkano::pipeline::viewport::Viewport;
 use vulkano::swapchain::Capabilities;
 use vulkano::swapchain::Surface;
 use vulkano::swapchain::{Swapchain, SurfaceTransform, PresentMode};
+use vulkano::swapchain;
 use vulkano::sync::GpuFuture;
 use vulkano_win::VkSurfaceBuild;
 use winit::EventsLoop;
@@ -48,10 +52,15 @@ fn main() -> Result<(), Box<Error>> {
     ) = init()?;
 
 
-    let image =
-        StorageImage::new(
-            device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
-            Format::R8G8B8A8Unorm, Some(queue.family())
+    let dimensions = capabilities.current_extent.unwrap_or([1280, 1024]);
+    let alpha = capabilities.supported_composite_alpha.iter().next().unwrap();
+    let format = capabilities.supported_formats[0].0;
+
+    let (swapchain, images) =
+        Swapchain::new(
+            device.clone(), surface.clone(), capabilities.min_image_count,
+            format, dimensions, 1, capabilities.supported_usage_flags, &queue,
+            SurfaceTransform::Identity, alpha, PresentMode::Fifo, true, None
         )?;
 
     let vertex1 = Vertex { position: [-0.5, -0.5] };
@@ -103,7 +112,7 @@ void main() {
                     color: {
                         load: Clear,
                         store: Store,
-                        format: Format::R8G8B8A8Unorm,
+                        format: swapchain.format(),
                         samples: 1,
                     }
                 },
@@ -131,20 +140,7 @@ void main() {
                 .build(device.clone())?
         );
 
-    let framebuffer =
-        Arc::new(
-            Framebuffer::start(render_pass.clone())
-                .add(image.clone())?
-                .build()?
-        );
-
-    let buf =
-        CpuAccessibleBuffer::from_iter(
-            device.clone(), BufferUsage::all(),
-            (0 .. 1024 * 1024 * 4).map(|_| 0u8)
-        )?;
-
-    let dynamic_state =
+    let mut dynamic_state =
         DynamicState {
             viewports: Some(vec![Viewport {
                 origin: [0.0, 0.0],
@@ -154,22 +150,43 @@ void main() {
             .. DynamicState::none()
         };
 
-    let command_buffer =
-        AutoCommandBufferBuilder::primary_one_time_submit(
-            device.clone(), queue.family()
-        )?
-            .begin_render_pass(framebuffer.clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()])?
-            .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), (), ())?
-            .end_render_pass()?
-            .copy_image_to_buffer(image.clone(), buf.clone())?
-            .build()?;;
+    let mut framebuffers =
+        window_size_dependent_setup(
+            &images,
+            render_pass.clone(),
+            &mut dynamic_state
+        );
 
-    let finished = command_buffer.execute(queue.clone())?;
-    finished.then_signal_fence_and_flush()?.wait(None)?;
+    loop {
 
-    let buffer_content = buf.read()?;
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
-    image.save("triangle.png")?;
+        let (image_num, acquire_future) = swapchain::acquire_next_image(swapchain.clone(), None)?;
+
+        let command_buffer =
+            AutoCommandBufferBuilder::primary_one_time_submit(
+                device.clone(), queue.family()
+            )?
+                .begin_render_pass(framebuffers[image_num].clone(), false, vec![[0.0, 0.0, 1.0, 1.0].into()])?
+                .draw(pipeline.clone(), &dynamic_state, vertex_buffer.clone(), (), ())?
+                .end_render_pass()?
+                .build()?;
+
+        let future = acquire_future
+            .then_execute(queue.clone(), command_buffer)?
+            .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
+            .then_signal_fence_and_flush();
+
+        let mut done = false;
+        events_loop.poll_events(|event| {
+
+            match event {
+                winit::Event::WindowEvent { event: winit::WindowEvent::CloseRequested, .. } => {
+                    done = true;
+                },
+                _ => (),
+            }
+        });
+        if done { break; }
+    }
 
     Ok(())
 }
@@ -253,4 +270,28 @@ fn init() ->
         instance, chosen_logical_device, chosen_queue,
         surface, capabilities, events_loop
     ))
+}
+
+/// This method is called once during initialization, then again whenever the window is resized
+fn window_size_dependent_setup(
+    images: &[Arc<SwapchainImage<Window>>],
+    render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
+    dynamic_state: &mut DynamicState
+) -> Vec<Arc<dyn FramebufferAbstract + Send + Sync>> {
+    let dimensions = images[0].dimensions();
+
+    let viewport = Viewport {
+        origin: [0.0, 0.0],
+        dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+        depth_range: 0.0 .. 1.0,
+    };
+    dynamic_state.viewports = Some(vec!(viewport));
+
+    images.iter().map(|image| {
+        Arc::new(
+            Framebuffer::start(render_pass.clone())
+                .add(image.clone()).unwrap()
+                .build().unwrap()
+        ) as Arc<dyn FramebufferAbstract + Send + Sync>
+    }).collect::<Vec<_>>()
 }
